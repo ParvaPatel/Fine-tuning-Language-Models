@@ -44,6 +44,12 @@ def get_args():
     parser.add_argument('--experiment_name', type=str, default='experiment',
                         help="How should we name this experiment?")
 
+    # Evaluation hyperparameters
+    parser.add_argument('--eval_every', type=int, default=1,
+                        help="Run full generation eval (F1) every N epochs; use loss-only eval in between")
+    parser.add_argument('--num_beams', type=int, default=4,
+                        help="Number of beams for beam search during generation (1 = greedy, faster)")
+
     # Data hyperparameters
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--test_batch_size', type=int, default=16)
@@ -52,7 +58,7 @@ def get_args():
     return args
 
 def train(args, model, train_loader, dev_loader, optimizer, scheduler):
-    best_f1 = -1
+    best_loss = float('inf')
     epochs_since_improvement = 0
 
     model_type = 'ft' if args.finetune else 'scr'
@@ -67,25 +73,37 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
         tr_loss = train_epoch(args, model, train_loader, optimizer, scheduler)
         print(f"Epoch {epoch}: Average train loss was {tr_loss}")
 
-        eval_loss, record_f1, record_em, sql_em, error_rate = eval_epoch(args, model, dev_loader,
-                                                                         gt_sql_path, model_sql_path,
-                                                                         gt_record_path, model_record_path)
-        print(f"Epoch {epoch}: Dev loss: {eval_loss}, Record F1: {record_f1}, Record EM: {record_em}, SQL EM: {sql_em}")
-        print(f"Epoch {epoch}: {error_rate*100:.2f}% of the generated outputs led to SQL errors")
+        # Run full generation eval (F1) every eval_every epochs; loss-only otherwise
+        do_generate = (epoch % args.eval_every == 0) or (epoch == args.max_n_epochs - 1)
+        eval_loss, record_f1, record_em, sql_em, error_rate = eval_epoch(
+            args, model, dev_loader,
+            gt_sql_path, model_sql_path,
+            gt_record_path, model_record_path,
+            generate=do_generate,
+        )
+        if do_generate:
+            print(f"Epoch {epoch}: Dev loss: {eval_loss}, Record F1: {record_f1}, Record EM: {record_em}, SQL EM: {sql_em}")
+            print(f"Epoch {epoch}: {error_rate*100:.2f}% of the generated outputs led to SQL errors")
+        else:
+            print(f"Epoch {epoch}: Dev loss: {eval_loss} (loss-only; full eval every {args.eval_every} epochs)")
 
         if args.use_wandb:
             result_dict = {
                 'train/loss' : tr_loss,
                 'dev/loss' : eval_loss,
-                'dev/record_f1' : record_f1,
-                'dev/record_em' : record_em,
-                'dev/sql_em' : sql_em,
-                'dev/error_rate' : error_rate,
             }
+            if do_generate:
+                result_dict.update({
+                    'dev/record_f1' : record_f1,
+                    'dev/record_em' : record_em,
+                    'dev/sql_em' : sql_em,
+                    'dev/error_rate' : error_rate,
+                })
             wandb.log(result_dict, step=epoch)
 
-        if record_f1 > best_f1:
-            best_f1 = record_f1
+        # Early stopping is always based on eval loss (well-correlated with F1)
+        if eval_loss < best_loss:
+            best_loss = eval_loss
             epochs_since_improvement = 0
         else:
             epochs_since_improvement += 1
@@ -95,6 +113,7 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
             save_model(checkpoint_dir, model, best=True)
 
         if epochs_since_improvement >= args.patience_epochs:
+            print(f"Early stopping at epoch {epoch} (no loss improvement for {args.patience_epochs} epochs)")
             break
 
 def train_epoch(args, model, train_loader, optimizer, scheduler):
@@ -130,15 +149,12 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
 
     return total_loss / total_tokens
         
-def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_path, model_record_path):
+def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_path, model_record_path,
+               generate=True):
     '''
-    You must implement the evaluation loop to be using during training. We recommend keeping track
-    of the model loss on the SQL queries, the metrics compute_metrics returns (save_queries_and_records should be helpful)
-    and the model's syntax error rate. 
-
-    To compute non-loss metrics, you will need to perform generation with the model. Greedy decoding or beam search
-    should both provide good results. If you find that this component of evaluation takes too long with your compute,
-    we found the cross-entropy loss (in the evaluation set) to be well (albeit imperfectly) correlated with F1 performance.
+    Evaluation loop. When generate=True (default), runs beam-search generation and computes
+    Record F1/EM/SQL EM. When generate=False, only computes teacher-forcing loss (fast path,
+    ~10s vs ~2min), returning zeros for generation metrics. Early stopping uses loss always.
     '''
     from transformers import T5TokenizerFast
     tokenizer = T5TokenizerFast.from_pretrained('google-t5/t5-small')
@@ -156,7 +172,7 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
             decoder_input = decoder_input.to(DEVICE)
             decoder_targets = decoder_targets.to(DEVICE)
 
-            # Compute loss (teacher-forcing)
+            # Always compute teacher-forcing loss (fast)
             logits = model(
                 input_ids=encoder_input,
                 attention_mask=encoder_mask,
@@ -169,19 +185,23 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
                 total_loss += loss.item() * num_tokens
                 total_tokens += num_tokens
 
-            # Generate SQL queries (greedy decoding)
-            generated = model.generate(
-                input_ids=encoder_input,
-                attention_mask=encoder_mask,
-                decoder_input_ids=initial_decoder_inputs.to(DEVICE),
-                max_new_tokens=256,
-                num_beams=4,
-                early_stopping=True,
-            )
-            decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
-            all_sql_queries.extend(decoded)
+            # Optionally run generation (slow)
+            if generate:
+                generated = model.generate(
+                    input_ids=encoder_input,
+                    attention_mask=encoder_mask,
+                    decoder_input_ids=initial_decoder_inputs.to(DEVICE),
+                    max_new_tokens=256,
+                    num_beams=args.num_beams,
+                    early_stopping=True,
+                )
+                decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
+                all_sql_queries.extend(decoded)
 
     avg_loss = total_loss / total_tokens if total_tokens > 0 else 0.0
+
+    if not generate:
+        return avg_loss, 0.0, 0.0, 0.0, 0.0
 
     # Save queries and records, then compute metrics
     save_queries_and_records(all_sql_queries, model_sql_path, model_record_path)
@@ -216,7 +236,7 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
                 attention_mask=encoder_mask,
                 decoder_input_ids=initial_decoder_inputs.to(DEVICE),
                 max_new_tokens=256,
-                num_beams=4,
+                num_beams=args.num_beams,
                 early_stopping=True,
             )
             decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
