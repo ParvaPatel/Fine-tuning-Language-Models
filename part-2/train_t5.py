@@ -43,12 +43,12 @@ def get_args():
                         help="If set, we will use wandb to keep track of experiments")
     parser.add_argument('--experiment_name', type=str, default='experiment',
                         help="How should we name this experiment?")
-
-    # Evaluation hyperparameters
+        # Evaluation hyperparameters
     parser.add_argument('--eval_every', type=int, default=1,
                         help="Run full generation eval (F1) every N epochs; use loss-only eval in between")
     parser.add_argument('--num_beams', type=int, default=4,
                         help="Number of beams for beam search during generation (1 = greedy, faster)")
+
 
     # Data hyperparameters
     parser.add_argument('--batch_size', type=int, default=16)
@@ -59,6 +59,7 @@ def get_args():
 
 def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     best_loss = float('inf')
+
     epochs_since_improvement = 0
 
     model_type = 'ft' if args.finetune else 'scr'
@@ -185,7 +186,7 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
                 total_loss += loss.item() * num_tokens
                 total_tokens += num_tokens
 
-            # Optionally run generation (slow)
+            ## Optionally run generation (slow)
             if generate:
                 generated = model.generate(
                     input_ids=encoder_input,
@@ -199,7 +200,6 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
                 all_sql_queries.extend(decoded)
 
     avg_loss = total_loss / total_tokens if total_tokens > 0 else 0.0
-
     if not generate:
         return avg_loss, 0.0, 0.0, 0.0, 0.0
 

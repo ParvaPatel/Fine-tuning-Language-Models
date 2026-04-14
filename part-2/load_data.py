@@ -1,4 +1,4 @@
-import os, random, re, string, json
+import os, random, re, string
 from collections import Counter
 from tqdm import tqdm
 import pickle
@@ -12,35 +12,6 @@ from transformers import T5TokenizerFast
 import torch
 
 PAD_IDX = 0
-
-def load_schema_string(schema_path):
-    """Build a schema string prioritizing the most-queried ATIS tables.
-
-    Tables are ordered from most to least important so that if the tokenizer
-    truncates long inputs the critical tables are always preserved.
-    The format is:  table: col1, col2, ... ; table2: ...
-    """
-    # Priority order: core query tables first, auxiliary lookup tables last
-    priority = [
-        'flight', 'airport', 'city', 'airline', 'fare', 'aircraft',
-        'airport_service', 'ground_service', 'fare_basis', 'restriction',
-        'flight_fare', 'class_of_service', 'days', 'state', 'food_service',
-        'flight_stop', 'date_day', 'compartment_class', 'flight_leg',
-        'dual_carrier', 'time_zone', 'equipment_sequence', 'time_interval',
-        'month', 'code_description',
-    ]
-    with open(schema_path, 'r') as f:
-        schema = json.load(f)
-    ents = schema['ents']
-    # Build ordered list: priority tables first, then any remaining ones
-    ordered = priority + [t for t in ents if t not in priority]
-    parts = []
-    for table in ordered:
-        if table in ents:
-            col_names = ', '.join(ents[table].keys())
-            parts.append(f"{table}: {col_names}")
-    return ' ; '.join(parts)
-
 
 class T5Dataset(Dataset):
 
@@ -57,24 +28,20 @@ class T5Dataset(Dataset):
         '''
         self.split = split
         self.tokenizer = T5TokenizerFast.from_pretrained('google-t5/t5-small')
-        schema_path = os.path.join(data_folder, 'flight_database.schema')
-        self.schema_str = load_schema_string(schema_path)
         self.data = self.process_data(data_folder, split, self.tokenizer)
 
     def process_data(self, data_folder, split, tokenizer):
         nl_path = os.path.join(data_folder, f'{split}.nl')
         nl_lines = load_lines(nl_path)
 
-        # Schema-augmented input: NL query first so the query is always preserved
-        # even if the schema is truncated. Schema provides table/column name guidance.
-        # Format: "translate English to SQL: <NL question> | <schema>"
+        # T5 performs better with a task prefix (standard fine-tuning practice)
         task_prefix = "translate English to SQL: "
-        nl_lines_prefixed = [task_prefix + line + " | " + self.schema_str for line in nl_lines]
+        nl_lines_prefixed = [task_prefix + line for line in nl_lines]
 
-        # Tokenize encoder inputs — longer max_length to fit the schema
+        # Tokenize encoder inputs (natural language)
         encoder_encodings = tokenizer(
             nl_lines_prefixed,
-            max_length=512,
+            max_length=128,
             truncation=True,
             padding=False,
         )
