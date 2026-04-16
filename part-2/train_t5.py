@@ -122,15 +122,29 @@ def try_execute_sql(query: str, timeout_secs: float = 3.0):
 def pick_best_candidate(candidates):
     '''
     Given a list of candidate SQL strings (ordered by beam score, best first),
-    return the first one that executes without a SQLite error.
-    Falls back to the top-ranked candidate (after fix_sql) if none execute.
+    execute them to find one that returns valid records.
+    Prioritizes queries that return at least 1 row over valid queries that return 0 rows.
+    Falls back to the top-ranked candidate if none execute successfully.
     '''
     fixed = [fix_sql(c) for c in candidates]
+    
+    valid_with_records = []
+    valid_empty = []
+    
     for sql in fixed:
-        ok, _ = try_execute_sql(sql)
+        ok, records = try_execute_sql(sql)
         if ok:
-            return sql
-    # If none executed, return the top candidate anyway (fix_sql already applied)
+            if len(records) > 0:
+                valid_with_records.append(sql)
+            else:
+                valid_empty.append(sql)
+                
+    if valid_with_records:
+        return valid_with_records[0]
+    if valid_empty:
+        return valid_empty[0]
+    
+    # If none executed, return the top candidate anyway
     return fixed[0]
 
 
@@ -293,7 +307,7 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path,
                     input_ids=encoder_input,
                     attention_mask=encoder_mask,
                     decoder_input_ids=initial_decoder_inputs.to(DEVICE),
-                    max_new_tokens=256,
+                    max_new_tokens=512,
                     num_beams=args.num_beams,
                     num_return_sequences=num_candidates,
                     early_stopping=True,
@@ -342,7 +356,7 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
                 input_ids=encoder_input,
                 attention_mask=encoder_mask,
                 decoder_input_ids=initial_decoder_inputs.to(DEVICE),
-                max_new_tokens=256,
+                max_new_tokens=512,
                 num_beams=args.num_beams,
                 num_return_sequences=num_candidates,
                 early_stopping=True,
