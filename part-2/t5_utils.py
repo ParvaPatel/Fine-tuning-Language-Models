@@ -39,14 +39,32 @@ def mkdir(dirpath):
             pass
 
 def save_model(checkpoint_dir, model, best):
-    # Save model checkpoint to be able to load the model later
+    # Save model-only checkpoint (kept for backward compatibility)
     mkdir(checkpoint_dir)
     suffix = 'best' if best else 'last'
     save_path = os.path.join(checkpoint_dir, f'model_{suffix}.pt')
     torch.save(model.state_dict(), save_path)
 
+def save_full_checkpoint(checkpoint_dir, model, optimizer, scheduler, epoch, best_f1, best=False):
+    '''
+    Save a complete training checkpoint: model weights + optimizer state +
+    scheduler state + epoch number + best F1. This allows perfect resumption
+    after preemption — optimizer momentum is fully restored.
+    '''
+    mkdir(checkpoint_dir)
+    suffix = 'best' if best else 'last'
+    torch.save({
+        'model':     model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict() if scheduler is not None else None,
+        'epoch':     epoch,
+        'best_f1':   best_f1,
+    }, os.path.join(checkpoint_dir, f'checkpoint_{suffix}.pt'))
+    # Also keep the model-only file so load_model_from_checkpoint still works
+    save_model(checkpoint_dir, model, best)
+
 def load_model_from_checkpoint(args, best):
-    # Load model from a checkpoint
+    # Load model-only checkpoint (used for final eval / inference)
     model = initialize_model(args)
     model_type = 'ft' if args.finetune else 'scr'
     checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
@@ -56,6 +74,47 @@ def load_model_from_checkpoint(args, best):
     model.load_state_dict(state_dict)
     model = model.to(DEVICE)
     return model
+
+def load_full_checkpoint(args, model, optimizer, scheduler, best=False):
+    '''
+    Load a full checkpoint into existing model/optimizer/scheduler objects.
+    Returns (model, optimizer, scheduler, epoch, best_f1).
+
+    Falls back to the legacy model-only checkpoint if no full checkpoint exists
+    (e.g. first resume after a run that used the old save_model() only).
+    '''
+    model_type = 'ft' if args.finetune else 'scr'
+    checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
+    suffix = 'best' if best else 'last'
+    full_path   = os.path.join(checkpoint_dir, f'checkpoint_{suffix}.pt')
+    legacy_path = os.path.join(checkpoint_dir, f'model_{suffix}.pt')
+
+    if os.path.exists(full_path):
+        ckpt = torch.load(full_path, map_location=DEVICE)
+        model.load_state_dict(ckpt['model'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+        if scheduler is not None and ckpt.get('scheduler') is not None:
+            scheduler.load_state_dict(ckpt['scheduler'])
+        epoch   = ckpt['epoch']
+        best_f1 = ckpt['best_f1']
+        print(f"Loaded full checkpoint: epoch={epoch}, best_f1={best_f1:.4f} "
+              f"(optimizer momentum restored)")
+    elif os.path.exists(legacy_path):
+        # Legacy model-only checkpoint — optimizer starts fresh (no momentum)
+        state_dict = torch.load(legacy_path, map_location=DEVICE)
+        model.load_state_dict(state_dict)
+        epoch   = args.start_epoch - 1
+        best_f1 = args.best_f1
+        print(f"Loaded legacy model-only checkpoint. "
+              f"start_epoch={args.start_epoch}, best_f1={best_f1:.4f} "
+              f"(NOTE: optimizer momentum not restored)")
+    else:
+        raise FileNotFoundError(
+            f"No checkpoint found at:\n  {full_path}\n  {legacy_path}"
+        )
+
+    model = model.to(DEVICE)
+    return model, optimizer, scheduler, epoch, best_f1
 
 def initialize_optimizer_and_scheduler(args, model, epoch_length):
     optimizer = initialize_optimizer(args, model)
