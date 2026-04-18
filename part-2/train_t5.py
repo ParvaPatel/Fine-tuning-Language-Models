@@ -90,7 +90,7 @@ def fix_sql(pred: str) -> str:
     return pred
 
 
-def try_execute_sql(query: str, timeout_secs: float = 3.0):
+def try_execute_sql(query: str, timeout_secs: float = 0.5):
     '''
     Attempt to execute a SQL query with a hard wall-clock timeout.
     Returns (success: bool, records: list).
@@ -126,13 +126,26 @@ def pick_best_candidate(candidates):
     Prioritizes queries that return at least 1 row over valid queries that return 0 rows.
     Falls back to the top-ranked candidate if none execute successfully.
     '''
-    fixed = [fix_sql(c) for c in candidates]
+    import concurrent.futures
     
+    fixed = [fix_sql(c) for c in candidates]
     valid_with_records = []
     valid_empty = []
     
-    for sql in fixed:
-        ok, records = try_execute_sql(sql)
+    # Formulate a wrapper to store results with their original ranking
+    def check_query(idx_and_sql):
+        idx, sql = idx_and_sql
+        ok, records = try_execute_sql(sql, timeout_secs=0.5)
+        return idx, sql, ok, records
+        
+    # Run SQLite executions concurrently to bypass severe timeout bottlenecks
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(fixed)) as executor:
+        results = executor.map(check_query, enumerate(fixed))
+        
+    # Sort results to process them in beam-score order (smallest idx first)
+    sorted_results = sorted(list(results), key=lambda x: x[0])
+    
+    for _, sql, ok, records in sorted_results:
         if ok:
             if len(records) > 0:
                 valid_with_records.append(sql)
