@@ -15,19 +15,43 @@ PAD_IDX = 0
 
 # Short schema hint (~65 tokens) injected before every NL question.
 # Keeps the encoder input well within 256 tokens so no NL question gets truncated.
-SCHEMA_PREFIX = (
-    "translate English to SQL. "
-    "Tables: flight(flight_id,from_airport,to_airport,airline_code,departure_time,"
-    "arrival_time,stops,flight_days,meal_code), "
-    "airport(airport_code,airport_name,state_code), "
-    "city(city_code,city_name,state_code,country_name), "
-    "airline(airline_code,airline_name), "
-    "fare(fare_id,from_airport,to_airport,one_direction_cost,round_trip_cost), "
-    "aircraft(aircraft_code,aircraft_description,manufacturer), "
-    "fare_basis(fare_basis_code,class_type,economy,discounted,night), "
-    "flight_fare(flight_id,fare_id), "
-    "airport_service(city_code,airport_code,miles_distant), "
-    "ground_service(city_code,airport_code,transport_type). | "
+SQL_SCHEMA_PREFIX = (
+    "translate English to SQL. Tables: "
+    "flight ( flight_id , airline_code , from_airport , to_airport , departure_time , "
+    "arrival_time , stops , flight_number , meal_code , aircraft_code_sequence , "
+    "flight_days , time_elapsed , connections , dual_carrier , airline_flight ) | "
+    "airport ( airport_code , airport_name , airport_location , state_code , "
+    "country_name , time_zone_code , minimum_connect_time ) | "
+    "airline ( airline_code , airline_name , note ) | "
+    "city ( city_code , city_name , state_code , country_name , time_zone_code ) | "
+    "airport_service ( airport_code , city_code , direction , miles_distant , minutes_distant ) | "
+    "fare ( fare_id , fare_airline , from_airport , to_airport , fare_basis_code , "
+    "round_trip_required , round_trip_cost , one_direction_cost , restriction_code ) | "
+    "flight_fare ( flight_id , fare_id ) | "
+    "fare_basis ( fare_basis_code , booking_class , class_type , premium , economy , "
+    "discounted , night , season , basis_days ) | "
+    "class_of_service ( booking_class , class_description , rank ) | "
+    "food_service ( meal_code , meal_description , compartment , meal_number ) | "
+    "ground_service ( airport_code , city_code , transport_type , ground_fare ) | "
+    "restriction ( restriction_code , advance_purchase , stopovers , saturday_stay_required , "
+    "no_discounts , minimum_stay , maximum_stay , application ) | "
+    "dual_carrier ( main_airline , dual_airline , service_name , low_flight_number , high_flight_number ) | "
+    "code_description ( code , description ) | "
+    "aircraft ( aircraft_code , aircraft_description , basic_type , manufacturer , propulsion , "
+    "wide_body , pressurized , capacity , wing_span , engines , weight , length , "
+    "pay_load , cruising_speed , range_miles ) | "
+    "equipment_sequence ( aircraft_code_sequence , aircraft_code ) | "
+    "flight_stop ( flight_id , stop_number , stop_airport , stop_days , stop_time , "
+    "arrival_time , departure_time , arrival_airline , arrival_flight_number , "
+    "departure_airline , departure_flight_number ) | "
+    "flight_leg ( flight_id , leg_number , leg_flight ) | "
+    "state ( state_code , state_name , country_name ) | "
+    "time_zone ( time_zone_code , time_zone_name , hours_from_gmt ) | "
+    "date_day ( month_number , day_number , year , day_name ) | "
+    "days ( days_code , day_name ) | "
+    "month ( month_number , month_name ) | "
+    "time_interval ( period , begin_time , end_time ) | "
+    "compartment_class ( compartment , class_type ) | "
 )
 
 
@@ -53,12 +77,12 @@ class T5Dataset(Dataset):
         nl_lines = load_lines(nl_path)
 
         # Lowercase NL + prepend schema-aware task prefix
-        nl_lines_prefixed = [SCHEMA_PREFIX + line.lower() for line in nl_lines]
+        nl_lines_prefixed = [SQL_SCHEMA_PREFIX + line.lower() for line in nl_lines]
 
         # Tokenize encoder inputs
         encoder_encodings = tokenizer(
             nl_lines_prefixed,
-            max_length=256,
+            max_length=1024,
             truncation=True,
             padding=False,
         )
@@ -83,7 +107,7 @@ class T5Dataset(Dataset):
 
             decoder_encodings = tokenizer(
                 sql_lines,
-                max_length=256,
+                max_length=512,
                 truncation=True,
                 padding=False,
             )
@@ -186,6 +210,9 @@ def load_t5_data(batch_size, test_batch_size):
 def normalize_sql(sql: str) -> str:
     '''Replace < and > operators with word tokens so the T5 tokenizer
     does not treat them as XML/HTML special characters.'''
+    sql = sql.replace(' <= ', ' LESSTHANEQUAL ')
+    sql = sql.replace(' >= ', ' GREATERTHANEQUAL ')
+    sql = sql.replace(' != ', ' NOTEQUAL ')
     sql = sql.replace(' < ', ' LESSTHAN ')
     sql = sql.replace(' > ', ' GREATERTHAN ')
     return sql
@@ -193,6 +220,9 @@ def normalize_sql(sql: str) -> str:
 
 def denormalize_sql(sql: str) -> str:
     '''Reverse the normalization applied in normalize_sql().'''
+    sql = sql.replace(' LESSTHANEQUAL ', ' <= ')
+    sql = sql.replace(' GREATERTHANEQUAL ', ' >= ')
+    sql = sql.replace(' NOTEQUAL ', ' != ')
     sql = sql.replace(' LESSTHAN ', ' < ')
     sql = sql.replace(' GREATERTHAN ', ' > ')
     return sql

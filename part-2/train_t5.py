@@ -90,7 +90,7 @@ def fix_sql(pred: str) -> str:
     return pred
 
 
-def try_execute_sql(query: str, timeout_secs: float = 3.0):
+def try_execute_sql(query: str, timeout_secs: float = 0.5):
     '''
     Attempt to execute a SQL query with a hard wall-clock timeout.
     Returns (success: bool, records: list).
@@ -122,15 +122,42 @@ def try_execute_sql(query: str, timeout_secs: float = 3.0):
 def pick_best_candidate(candidates):
     '''
     Given a list of candidate SQL strings (ordered by beam score, best first),
-    return the first one that executes without a SQLite error.
-    Falls back to the top-ranked candidate (after fix_sql) if none execute.
+    execute them to find one that returns valid records.
+    Prioritizes queries that return at least 1 row over valid queries that return 0 rows.
+    Falls back to the top-ranked candidate if none execute successfully.
     '''
+    import concurrent.futures
+    
     fixed = [fix_sql(c) for c in candidates]
-    for sql in fixed:
-        ok, _ = try_execute_sql(sql)
+    valid_with_records = []
+    valid_empty = []
+    
+    # Formulate a wrapper to store results with their original ranking
+    def check_query(idx_and_sql):
+        idx, sql = idx_and_sql
+        ok, records = try_execute_sql(sql, timeout_secs=0.5)
+        return idx, sql, ok, records
+        
+    # Run SQLite executions concurrently to bypass severe timeout bottlenecks
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(fixed)) as executor:
+        results = executor.map(check_query, enumerate(fixed))
+        
+    # Sort results to process them in beam-score order (smallest idx first)
+    sorted_results = sorted(list(results), key=lambda x: x[0])
+    
+    for _, sql, ok, records in sorted_results:
         if ok:
-            return sql
-    # If none executed, return the top candidate anyway (fix_sql already applied)
+            if len(records) > 0:
+                valid_with_records.append(sql)
+            else:
+                valid_empty.append(sql)
+                
+    if valid_with_records:
+        return valid_with_records[0]
+    if valid_empty:
+        return valid_empty[0]
+    
+    # If none executed, return the top candidate anyway
     return fixed[0]
 
 
@@ -293,7 +320,7 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path,
                     input_ids=encoder_input,
                     attention_mask=encoder_mask,
                     decoder_input_ids=initial_decoder_inputs.to(DEVICE),
-                    max_new_tokens=256,
+                    max_new_tokens=512,
                     num_beams=args.num_beams,
                     num_return_sequences=num_candidates,
                     early_stopping=True,
@@ -342,7 +369,7 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
                 input_ids=encoder_input,
                 attention_mask=encoder_mask,
                 decoder_input_ids=initial_decoder_inputs.to(DEVICE),
-                max_new_tokens=256,
+                max_new_tokens=512,
                 num_beams=args.num_beams,
                 num_return_sequences=num_candidates,
                 early_stopping=True,
