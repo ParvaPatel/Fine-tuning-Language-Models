@@ -20,12 +20,18 @@ def analyze_errors():
     gts = load_lines(gt_file)
     preds = load_lines(pred_file)
     
+    print(f"Successfully loaded {len(nls)} examples from DEV set.")
+    print("Connecting to flight_database.db and evaluating queries...")
+    
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     
     errors = []
     
     for i in range(len(nls)):
+        if i % 50 == 0 and i > 0:
+            print(f"  -> Processed {i}/{len(nls)} SQL predictions...")
+            
         nl = nls[i]
         gt = gts[i]
         pred = preds[i]
